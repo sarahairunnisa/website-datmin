@@ -1,121 +1,161 @@
 import streamlit as st
-import numpy as np
-from PIL import Image
+import os
 import cv2
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.metrics import silhouette_score
+from matplotlib.patches import Patch
 
-# Warna-warna yang lebih lembut untuk representasi kluster
-soft_colors = [
-    [173, 216, 230],  # Light Blue
-    [119, 158, 203],  # Slate Blue
-    [240, 230, 140],  # Khaki
-    [176, 224, 230],  # Powder Blue
-    [222, 184, 135],  # Burlywood
-    [152, 251, 152],  # Pale Green
-    [255, 228, 196],  # Bisque
-    [216, 191, 216],  # Thistle
-    [192, 192, 192],  # Silver
-    [255, 182, 193]   # Light Pink
-]
+# Fungsi untuk load gambar dari folder
+def load_images_from_folder(uploaded_files, image_size=(256, 256)):
+    images = []
+    for uploaded_file in uploaded_files:
+        file_bytes = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
+        img = cv2.imdecode(file_bytes, 1)
+        if img is not None:
+            img = cv2.resize(img, image_size)  # Resize agar lebih cepat
+            images.append(img)
+    return np.array(images)
 
-# Fungsi untuk menghitung jarak Euclidean antara dua vektor
-def euclidean_distance(a, b):
-    return np.sqrt(np.sum((a - b) ** 2))
+# Kelas K-Means dari awal
+class K_Means:
+    def __init__(self, k=2, tol=0.001, max_iter=100):
+        self.k = k
+        self.tol = tol
+        self.max_iter = max_iter
 
-# Fungsi untuk segmentasi gambar menggunakan K-Means manual
-def kmeans_manual(image, k, centroids, max_iters=100):
-    # Ubah gambar ke ruang warna LAB agar clustering lebih baik
-    lab_image = cv2.cvtColor(image, cv2.COLOR_RGB2LAB)
+    def fit(self, data):
+        self.centroids = {}
+        for i in range(self.k):
+            self.centroids[i] = data[i]
 
-    # Reshape gambar menjadi array dua dimensi
-    pixels = lab_image.reshape(-1, 3)
+        for i in range(self.max_iter):
+            self.classifications = {j: [] for j in range(self.k)}
+            distances = np.linalg.norm(data[:, np.newaxis] - np.array(list(self.centroids.values())), axis=2)
+            labels = np.argmin(distances, axis=1)
 
-    for _ in range(max_iters):
-        # Hitung jarak setiap piksel ke setiap centroid
-        distances = np.zeros((pixels.shape[0], k))
-        for j in range(k):
-            distances[:, j] = np.linalg.norm(pixels - centroids[j], axis=1)
+            for idx, label in enumerate(labels):
+                self.classifications[label].append(data[idx])
 
-        # Tentukan kluster setiap piksel berdasarkan jarak terdekat ke centroid
-        labels = np.argmin(distances, axis=1)
+            prev_centroids = dict(self.centroids)
+            for classification in self.classifications:
+                self.centroids[classification] = np.mean(self.classifications[classification], axis=0)
 
-        # Hitung ulang centroid berdasarkan rata-rata piksel di setiap kluster
-        new_centroids = np.array([pixels[labels == j].mean(axis=0) for j in range(k)])
+            optimized = True
+            for c in self.centroids:
+                if np.sum((self.centroids[c] - prev_centroids[c]) / prev_centroids[c] * 100.0) > self.tol:
+                    optimized = False
+            if optimized:
+                break
 
-        # Jika centroid tidak berubah, keluar dari loop
-        if np.all(centroids == new_centroids):
-            break
-        
-        centroids = new_centroids
+    def predict(self, data):
+        distances = np.linalg.norm(data - np.array(list(self.centroids.values())), axis=1)
+        return np.argmin(distances)
 
-    # Buat gambar dengan warna lembut untuk tiap kluster
-    segmented_image = np.zeros(image.shape, dtype=np.uint8)
-    for i in range(k):
-        segmented_image[labels.reshape(image.shape[:2]) == i] = soft_colors[i]
+# Preprocessing gambar
+def preprocess_image(image):
+    img_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    vectorized = img_rgb.reshape((-1, 3))
+    return np.float32(vectorized)
 
-    return segmented_image, centroids
+# Fungsi untuk menghitung silhouette score dan inertia
+def compute_eval_metrics(vectorized, label, center):
+    silhouette = silhouette_score(vectorized, label)
+    inertia = np.sum((vectorized - center[label.flatten()]) ** 2)  # Hitung inertia
+    return silhouette, inertia
 
-# Setup Streamlit
-st.title("Segment Level Clustering dengan Warna Lembut")
+# Visualisasi hasil clustering
+def visualize_results(original_image, segmented_images, K_values, img_index, cluster_centers_list, silhouettes, inertias):
+    original_image_rgb = cv2.cvtColor(original_image, cv2.COLOR_BGR2RGB)
+    figure_size = 20
+    plt.figure(figsize=(figure_size, figure_size))
 
-# Menu untuk memilih latihan atau pengujian
-menu = st.sidebar.selectbox("Pilih Menu", ("Latihan", "Pengujian"))
+    plt.subplot(1, 4, 1)
+    plt.imshow(original_image_rgb)
+    plt.title(f'Original Image {img_index + 1}')
+    plt.xticks([]) 
+    plt.yticks([])
 
-# Input untuk memilih jumlah cluster (K)
-k_value = st.sidebar.number_input("Masukkan jumlah K (cluster)", min_value=2, max_value=10, value=3)
+    for i, (segmented_image, K, cluster_centers) in enumerate(zip(segmented_images, K_values, cluster_centers_list)):
+        plt.subplot(1, 4, i + 2)
+        plt.imshow(segmented_image)
+        plt.title(f'Segmented (K={K})\nSilhouette: {silhouettes[i]:.2f}, Inertia: {inertias[i]:.2f}')
+        plt.xticks([])
+        plt.yticks([])
 
-if menu == "Latihan":
-    # Input gambar untuk latihan
-    uploaded_files = st.sidebar.file_uploader("Upload Gambar untuk Latihan", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
+        # Create legend for cluster colors
+        patches = [Patch(facecolor=np.array(center)/255, label=f'Cluster {j+1}') for j, center in enumerate(cluster_centers)]
+        plt.legend(handles=patches, loc='upper right', bbox_to_anchor=(1.2, 1))
 
-    # Jika file gambar diunggah
-    if uploaded_files:
-        images = []
+    plt.tight_layout()
+    st.pyplot(plt)
 
-        for uploaded_file in uploaded_files:
-            # Baca gambar
-            img = Image.open(uploaded_file)
-            img = img.resize((256, 256))  # Ubah ukuran gambar
-            img_np = np.array(img)  # Konversi ke numpy array
-            images.append(img_np)
+# Proses gambar
+def process_images(images, K_values=[2, 3, 4]):
+    for img_index, original_image in enumerate(images):
+        vectorized = preprocess_image(original_image)  # Flatten and vectorize the image
+        segmented_images = []
+        cluster_centers_list = []
+        silhouettes = []
+        inertias = []
 
-        # Latihan untuk menghitung centroid
-        centroids = []
-        for img in images:
-            lab_image = cv2.cvtColor(img, cv2.COLOR_RGB2LAB)
-            pixels = lab_image.reshape(-1, 3)
-            centroids.append(pixels[np.random.choice(pixels.shape[0], k_value, replace=False)])
+        for K in K_values:
+            model = K_Means(k=K)
+            model.fit(vectorized)
+            label = np.array([model.predict(point) for point in vectorized])
+            center = np.array([model.centroids[i].astype(np.uint8) for i in model.centroids])
 
-        # Rata-rata centroid dari semua gambar
-        st.session_state.centroids = np.mean(centroids, axis=0)  # Simpan centroid di session state
+            segmented_image = np.zeros_like(original_image)
 
-        st.success("Latihan selesai! Centroid telah dihitung.")
+            # Reconstruct the segmented image from the labels and centers
+            for i in range(K):
+                mask = (label.flatten() == i)
+                mask = mask.reshape(original_image.shape[:2])
+                color = np.uint8(center[i])
+                segmented_image[mask] = color
 
-elif menu == "Pengujian":
-    # Input gambar untuk pengujian
-    uploaded_files = st.sidebar.file_uploader("Upload Gambar untuk Pengujian", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
+            segmented_images.append(segmented_image)
+            cluster_centers_list.append(center)  # Store cluster centers (colors)
 
-    # Jika file gambar diunggah dan centroid telah ada
-    if uploaded_files and 'centroids' in st.session_state:
-        images = []
+            # Compute evaluation metrics
+            silhouette, inertia = compute_eval_metrics(vectorized, label, center)
+            silhouettes.append(silhouette)
+            inertias.append(inertia)
 
-        for uploaded_file in uploaded_files:
-            # Baca gambar
-            img = Image.open(uploaded_file)
-            img = img.resize((256, 256))  # Ubah ukuran gambar
-            img_np = np.array(img)  # Konversi ke numpy array
-            images.append(img_np)
+        visualize_results(original_image, segmented_images, K_values, img_index, cluster_centers_list, silhouettes, inertias)
 
-        # Menampilkan gambar yang telah tersegmentasi
-        for idx, image in enumerate(images):
-            st.write(f"Gambar {idx + 1}")
+# Custom CSS for background color and centered text
+st.markdown("""
+    <style>
+    .stApp {
+        background: linear-gradient(to bottom, #FFD1DC, #F0E68C); /* Pink pastel to light yellow gradient */
+    }
+    h1 {
+        text-align: center;
+    }
+    p {
+        text-align: center;
+    }
+    </style>
+    """, unsafe_allow_html=True)
 
-            # Tampilkan gambar asli
-            st.image(image, caption="Gambar Asli", use_column_width=True)
+# Centered Title
+st.markdown("<h1>Aerial Image Clustering using K-Means</h1>", unsafe_allow_html=True)
 
-            # Lakukan segmentasi
-            segmented_image, _ = kmeans_manual(image, k_value, st.session_state.centroids)
+# Centered Subheading
+st.markdown("""
+<p>
+Created by Group 3 consisting of Aliya Sania (210035), Sarah Khairunnisa Prihantoro (210063), and Zakia Noorardini (210065) 
+to fulfill the Midterm Exam for Data Mining 2024.
+</p>
+""", unsafe_allow_html=True)
 
-            # Tampilkan gambar hasil segmentasi
-            st.image(segmented_image, caption=f"Gambar Tersegmentasi dengan {k_value} kluster", use_column_width=True)
-    else:
-        st.warning("Silakan lakukan latihan terlebih dahulu untuk mendapatkan centroid sebelum melakukan pengujian.")
+
+# Upload images
+uploaded_files = st.file_uploader("Upload Image Files", type=['png', 'jpg', 'jpeg'], accept_multiple_files=True)
+k_values = st.multiselect('Select K values for K-Means', options=[2, 3, 4, 5, 6], default=[2, 3])
+
+if uploaded_files and k_values:
+    images = load_images_from_folder(uploaded_files)
+    st.write(f"Total images uploaded: {len(images)}")
+    process_images(images, K_values=k_values)
